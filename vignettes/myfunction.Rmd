@@ -1,0 +1,359 @@
+---
+title: "myfunction"
+author: '22067'
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{myfunction}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r}
+library(StatComp22067)
+```
+
+## Introduction
+
+Given n independent and identically distributed (i.i.d) data samples ${x_1, \dots , x_n}$ from an n-variate multinormal distribution $N(\mu,\Sigma)$, we wish to estimate the mean $\mu \in R^n$ and the covariance $\Sigma\in  \mathbb{R}^{n×n}$. It is well known that
+$\frac{1}{n}\sum_{i=1}^n x_i$ is the maximum likelihood estimation (MLE)
+for $\mu$, whereas the solution of
+$$\min_{X>0}\quad tr(SX) − log\ det(X) \tag{1}$$
+is the MLE for the inverse covariance $\Sigma^{-1}$, where $S\geq0$ is the sample covariance $S = \frac{1}{n}\sum_{i=1}^n (x_i − \mu)(x_i − \mu)^T$. The sparsity pattern of $X=Σ−1$ reveals conditional independences between variables. In many pract
+ical applications, the inverse covariance is sparse.
+
+The functions uses a nonconvex l0-constrained model. Denote $$\Omega=\{X\in \mathbb{R}^{n×n}:||X||_0\leq\kappa,\ X_{i,j}=0\quad\forall(i,j) \in \mathfrak{I} \},$$  
+where $\kappa$ is a maximally allowable number of nonzeros and $\mathfrak{I}$ is the index set of variables known to be conditionally independent. Given $\Omega$, we can directly constrain sparsity by solving
+$$\min_{X\in \Omega \cap \mathbb{S}^n_{++} }\quad tr(SX) − log\ det(X) \tag{2}$$
+where $\mathbb{S}^n_{++}$ is the set of symmetric positive definite matrices in $\mathbb{R}^{n×n}$.
+
+## Algorithm Description
+
+Since the set of optimal solutions for $(2)$ can be unbounded, it will be difficult to apply any algorithm directly. The algorithm tries to solve a sequence of subproblems parameterized by $\lambda > 0$ instead of directly solving $(2)$. The problem can be rewrote to $$\min_{X\in \Omega \cap \mathbb{S}^n_{++} }\quad f(X)=tr(SX) − log\ det(X)+\frac{\lambda}{2}||X||_F^2 \tag{3}$$ 
+
+The function $f$ is strongly convex and the optimal solution set is bounded so we can get the solutions more easily. By driving $\lambda$ to zero in $(2)$, an optimal solution for $(2)$, the true problem of interest, can be obtained. Thus, the algorithm consider a sequence of strictly decreasing values $\{\lambda_l\}$. In the $l-th$ iteration of the algorithm, we will seek an approximate minimizer to $(3)$ with $\lambda=\lambda_l$. In the $(l + 1)-th$ iteration, the solution to the $l-th$ subproblem will be used as an initial point.  
+
+## Projection Operator _pp_
+
+The source R code for _pp_ is as follows:
+```{r,eval=FALSE}
+pp <- function(x,kap,omiga){
+   n = nrow(x)
+   y = x
+   y[omiga] = 0
+   vecy = as.vector(y)
+   num1 = abs(vecy)
+   num_s = sort.int(num1,decreasing = TRUE,index.return = TRUE)
+   mat0 <- matrix(0,n,n)
+   for (s in 1:kap){
+     l = num_s$ix[s]
+     l1 = ceiling(l/n)
+     l0 = l-(l1-1)*n
+     mat0[l0,l1] = num_s$x[s] 
+   }
+   return(mat0)
+}
+```
+
+The definition of the projection operator is:
+$$P_{\Omega}(X)=\underset{Y \in \Omega}{\arg\min} ||X-Y||_F$$
+We use the projection to ensure that the sparsity constraint is satisfied. A member of $P_{\Omega}(X)$ can be quickly determined. If $X \in \mathbb{R}^{n×n}$, then first we set $X_{i,j} = 0$ for every $(i, j) \in \mathfrak{I}$. A member of $P_{\Omega}(X)$ is obtained by sorting the absolute values of the $n^2$ entries in $X$ and setting all but the $\kappa$ largest values in $X$ to zero. 
+
+## Approximate Newton Direction _cgd_
+
+The source R code for _cgd_ is as follows:
+```{r,eval=FALSE}
+cgd <- function(g,H,wk){
+  k = 1
+  b = as.vector(t(g))
+  n = length(b)
+  b[-wk] = 0
+  v0 = rep(0, n)
+  x <- list(); r <- list(); p <- list(); y <- list()
+  x[[1]] = v0
+  r[[1]] = b
+  p[[1]] = b 
+  while (k <= n+1 & max(r[[k]]) > 0.05){
+    if(identical(r[[k]],v0) == TRUE){break} 
+    y[[k]] = H %*% p[[k]]
+    y[[k]][-wk] = 0
+    alpha = as.numeric((t(r[[k]])%*%r[[k]])/(t(p[[k]])%*%y[[k]]))
+    x[[k+1]] = x[[k]] + alpha*p[[k]]
+    r[[k+1]] = r[[k]] - alpha*y[[k]]
+    beta = as.numeric((t(r[[k+1]])%*%r[[k+1]])/(t(r[[k]])%*%r[[k]]))
+    p[[k+1]] = r[[k+1]] + beta*p[[k]]
+    k = k+1
+  }
+  D = matrix(x[[k]],nrow(g))
+  return(D)
+}
+```
+
+We use approximate Newton directions to improve the empirical convergence rate. The direction $D$ is obtained by solving a quadratic problem:
+$$\min_{[D]_{W_k}\in\mathbb{R^{n\times n}}} tr(\nabla f(X^k)[D]_{W^k})+\frac{1}{2}vec([D]_{W^k})^T\nabla^2f(X^k)vec([D]_{W^k}).$$
+The solution can be computed efficiently using a conjugate gradient method.
+
+A simplified conjugate gradient method in _Rcpp_ is as follows:
+```{r,eval=FALSE}
+arma::mat conjugate(arma::mat A, arma::vec b) {
+  int k = 1;
+  int n = b.n_elem; 
+  arma::mat v0 = arma::zeros(n,1);
+  arma::mat x0 = v0;
+  arma::mat x1 = v0;
+  arma::mat p1 = v0;
+  arma::mat r0 = v0;
+  arma::mat r1 = v0;
+  arma::mat p0 = v0;
+  r0.col(0) = -b;
+  p0.col(0) = b;
+  while(k <= n+1 && arma::norm(r0,"inf") > 0.05){
+    arma::mat alpha = r0.t() * r0 / (p0.t() * A * p0);
+    x1 = x0 + alpha(0,0) * p0;
+    r1 = r0 + alpha(0,0) * A * p0;
+    arma::mat beta = r1.t() * r1 / (r0.t() * r0);
+    p1 = -r1 + beta(0,0) * p0;
+    p0 = p1; 
+    r0 = r1;
+    x0 = x1;
+    k += 1;
+  }
+  return(x0);
+}
+```
+
+
+## Approximate Newton Algorithm _ANA_
+
+The source R code for _ANA_ is as follows:
+```{r,eval=FALSE}
+ANA <- function(stop.coef,L0,kk,omiga,lambda,sigma,elta,alpha_max,alpha_min,alpha_min_newton,epson,l,p,q,s){
+  #stepsize alpha_bb
+  alpha_bb <- function(x0,x1,lambda,s){
+    a = t(f_gra1(x1,lambda,s) - f_gra1(x0,lambda,s))
+    alp_b = sum(diag(a %*% (x1-x0)))/(norm(x1-x0,"F")^2)
+    return(alp_b)
+  }
+  
+  k = 1
+  x1 = t(L0)%*%L0
+  x0 = x1 + (10^(-l))*f_gra1(x1,lambda,s)
+  L1 = L0
+  L0 = chol(x0)
+  o1 = 1; o2 = 0
+  grad_step = TRUE
+  while (o1 >= o2){ 
+    if (k%%q!=p) {
+      if (grad_step==TRUE){
+         wk = which(x1!=0 | abs(x0-x1)>=epson)
+      }else{
+         Y = pp(x1 - alpha * f_gra1(x1,lambda,s),kk,omiga)
+         wk = which(x1!=0 | abs(Y-x1)>=epson)
+      } 
+      D = cgd(f_gra1(x1,lambda,s),f_gra2(x1,lambda,s),wk)
+    
+      alpha = 1
+      alpha_0 = 1
+      j = 0
+      ls = TRUE
+      while (ls==TRUE & alpha >= alpha_min_newton) {
+        alpha = alpha_0*sigma^j
+        x_tr = pp(x1-alpha*D,kk,omiga)
+        fit <- try(chol(x_tr),silent = TRUE)
+        if ("try-error"%in%class(fit)){
+          j = j+1
+        }else{
+          L_tr = chol(x_tr)
+          if (f(x_tr,lambda,s)>max(f(x0,lambda,s),f(x1,lambda,s))-elta/2*sum(diag(t(x_tr-x1)%*%(x_tr-x1)))){
+           j = j+1
+           if (alpha<alpha_min){
+             break
+           }
+          }else{
+            ls = FALSE
+            L2 = L_tr
+            L0 = L1
+            L1 = L2
+            x0 = t(L0)%*%L0
+            x1 = t(L1)%*%L1
+          }
+         }
+      }
+    }
+    grad_step = FALSE
+    alpha = 1
+    if (k%%q==p | alpha<alpha_min_newton){
+      G = f_gra1(x1,lambda,s)
+      alpha_0 = min(alpha_max,max(alpha_min,alpha_bb(x0,x1,lambda,s)))
+      j = 0
+      ls = TRUE
+      while (ls == TRUE) {
+        alpha = alpha_0*sigma^j
+        x_tr = pp(x1-alpha*G,kk,omiga)
+        fit <- try(chol(x_tr),silent = TRUE)
+        if ("try-error"%in%class(fit)){
+          j = j+1
+        }else{
+          L_tr = chol(x_tr)
+          if (f(x_tr,lambda,s)>max(f(x0,lambda,s),f(x1,lambda,s))-elta/2*sum(diag(t(x_tr-x1)%*%(x_tr-x1)))){
+           j = j+1
+           if (alpha<alpha_min){
+             break
+           }
+          }else{
+            ls = FALSE
+            L2 = L_tr
+            L0 = L1
+            L1 = L2
+            x0 = t(L0)%*%L0
+            x1 = t(L1)%*%L1
+          }
+        }
+      }
+      grad_step = TRUE
+    }
+     k = k+1
+     o1 = abs(f(x1,lambda,s)-f(x0,lambda,s))
+     o2 = max(1,abs(f(x0,lambda,s)))*stop.coef
+  }
+    return(L1)
+}
+```
+
+This function is used to solve a subproblem $(3)$. In the algorithm, the negative gradient direction $−\nabla f(X)$ and an approximate Newton direction $D$ are alternatively employed. Feasibility of the sparsity constraint $\Omega$ is handled via projection. Feasibility of the symmetric positive definiteness is ensured through a line search procedure. To improve computing efficiency, the cholesky decomposition is useful in this case.
+
+The stopping criterion for ANA at the final step of HANA ($l=L$) is chosen as
+$$|f(X^k) − f(X^{k−1})| ≤ 10^{−5} max\{1,|f(X^{k−1})|\}$$
+and for the previous steps ($l=0,\dots,L−1$) is 
+$$|f(X^k) − f(X^{k−1})| ≤ 10^{−2} max\{1,|f(X^{k−1})|\}.$$
+The initial point is chosen as $X^{(0)}=(diag(S) + 10^{−2}I_n)^{−1}$.
+
+## Homotopy Approximate Newton Method _HANA_
+
+The source R code for _HANA_ is as follows:
+```{r,eval=FALSE}
+HANA <- function(n,kkk,omiga,s,epson = 1e-2,lambda_L=1e-5,lambda_0=1e-1,sigma=0.5,elta = 1e-6,alpha_min=1e-15,alpha_max =1e15,alpha_min_newton=1e-5,L=10,p=1,q=5){
+  t1 = Sys.time()
+  stop.coef = 1e-2
+  x0 = solve(diag(diag(s))+0.01*diag(n)) 
+  L0 = chol(x0)
+  kk = seq(from=2*kkk,to=kkk,length.out=L+1)
+  lambda_L_log = log10(lambda_L)
+  lambda_0_log = log10(lambda_0)
+  lambda_log = seq(from=lambda_0_log,to = lambda_L_log,length.out = L+1)
+  lambda = 10^lambda_log
+  for (l in 1:L+1) {
+    if (l==L+1){
+      stop.coef=1e-5
+    }
+   L1 = ANA(stop.coef,L0,kk[l],omiga,lambda[l],sigma,elta,alpha_max,alpha_min,alpha_min_newton,epson,l,p,q,s)
+   L0 = L1
+   }
+   t2 = Sys.time()
+   print(t2-t1)
+   return(L1)
+}
+```
+
+This function solves a sequence of subproblems with the form $(3)$ by calling function ANA and attempt to find increasingly better minimizers. In the function, two decreasing sets $\kappa_0\geq \kappa_1\geq\dots\geq\kappa_L=\kappa$ and $\lambda_0\geq \lambda_1\geq\dots\geq\lambda_L>0$ are selected before running the algorithm. Note that the end parameter $\lambda_L$ should be chosen quite small. In practice, we set $L=10,\ \kappa_0=2\kappa,\ \lambda_L=10^{-5},\ \lambda_0=10^{-1}$. The values $\kappa_l$ are uniformly spaced on the interval $[\kappa, \kappa_0]$, and $log_{10}\lambda_l$ is uniformly spaced on the interval $[log_{10}\lambda_L, log_{10}\lambda_0]$. 
+
+The algorithm first solves a subproblem $(3)$ with sparsity parameter $\kappa_0$,   regularization parameter $\lambda_0$ and initial point $X^{(0)}$. Then, it solves $(3)$ for each pair $(\kappa_l,\lambda_l)$ and uses the previous solution $X^{(l-1)}$ as an initial point. In the final step, we obtain $X^{(L)}$ as the estimation of the covariance $\Sigma^{-1}$.
+
+## Evaluation functions 
+
+There are five functions to evaluate the performance of the above algorithm. The source R code is as follows: 
+```{r,eval=FALSE}
+TNR <- function(s,x){
+  isclose0 <- function(x){
+    return(isTRUE(all.equal(x,0)))
+  }
+  k1 = sum(s == 0 & apply(x,c(1,2),isclose0))
+  k2 = sum(s == 0)
+  return(k1/k2)
+}
+
+TPR <- function(s,x){
+  isclose0 <- function(x){
+    return(isTRUE(all.equal(x,0)))
+  }
+  k1 = sum(s != 0 & !apply(x,c(1,2),isclose0))
+  k2 = sum(s != 0) 
+  return(k1/k2)
+}
+
+likelihood <- function(s,x){
+  d = log(det(x)) - sum(diag(s %*% x))
+  return(d)
+}
+
+LossE <- function(s,x,n){
+  d = (1/n)*(sum(diag(s %*% x))-log(det(s %*% x))-n)
+  return(d)
+}
+
+LossQ <- function(s,x,n){
+  d = 1/n*norm(s %*% x - diag(n),"F")
+  return(d)
+}
+```
+
+True negative rate(specificity) and true positive rate(sensitivity) are defined as:
+$$TNR=\frac{TN}{TN+FP}=\frac{|(i,j):\ X_{i,j}=0,\hat S^{-1}_{i,j}=0|}{|(i,j):\ \hat S^{-1}_{i,j}=0|},$$
+$$TPR=\frac{TP}{TP+FN}=\frac{|(i,j):\ X_{i,j}\neq0,\hat S^{-1}_{i,j}\neq0|}{|(i,j):\ \hat S^{-1}_{i,j}\neq0|}.$$
+
+The normalized entropy loss (lossE) and quadratic loss (lossQ) are defined, respectively, as:
+$$lossE=\frac{1}{n}(tr(\hat SX)-log\ det(\hat SX)-n),$$
+$$lossQ = \frac{1}{n}||\hat SX-I_n||_F.$$
+
+The log-likelihood performance metric is the negative of the objective function of $(2)$ : $$likelihood=log\ det(X)-tr(\hat SX).$$
+
+## Data Generation _AR2_
+
+The R source code for _AR2_ is as follows:
+```{r}
+AR2 <- function(n){
+  A = diag(n)
+  for (i in 1:n){
+    for (j in 1:n){
+      if (abs(i-j)==1) {
+        A[i,j]=0.5
+      }else{
+        if (abs(i-j)==2){
+          A[i,j] = 0.25
+        }
+      }
+    }
+  }
+  return(A)
+}
+```
+
+This function is used to create synthetic data sets by generating a ground truth sparse inverse covariance $\hat S^{-1}$. The AR2 matrix is defined by:
+$$\hat S^{-1}_{i,i}=1,\hat S^{-1}_{i-1,i}=\hat S^{-1}_{i,i-1}=0.5,\hat S^{-1}_{i-2,i}=\hat S^{-1}_{i,i-2}=0.25\  and\  zero\  otherwise.$$
+
+## Examples of the Functions Above
+
+We generate $2n$ samples from a n-dimensional multinormal distribution $N(0,\hat S)$ and compute the sample covariance $S$. Besides, we set sparsity constraint $\kappa=494$ and assume throughout the experiment that none of the independence structure is known. In other words, we choose $\mathfrak{I}=\emptyset$ in $(2)$.
+```{r,eval=TRUE}
+library(MASS)
+set.seed(1)
+n = 100
+A = AR2(n)
+m = rep(0,n)
+data <- mvrnorm(2*n,m,solve(A))
+s = var(data)
+omiga = integer(0)
+L = HANA(n,494,omiga,s)
+x = t(L) %*% L
+```
+
+The performance of the function can be evaluated:
+```{r,eval=TRUE}
+TNR(A,x)
+TPR(A,x)
+LossQ(solve(A),x,n)
+LossE(solve(A),x,n)
+likelihood(s,x)
+```
+
+It is shown that TNR and TPR are both close to 1. If the independence structure is known, there is large chance that TNP and TPR will reach 1. The lossE, lossQ are also small, which indicates that the function has a good performance. 

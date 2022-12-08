@@ -1,0 +1,19 @@
+Package: StatComp22067
+Type: Package
+Title: Solve the l0-constraint sparse inverse covariance estimation problems 
+Version: 1.0
+Date: 2022-12-07
+Author: 22067
+Maintainer: 22067 <wangrc1960@mail.ustc.edu.cn>
+Description: Estimate MLE of the inverse covairance for multinormal distribution which many variables are conditionally independent.  
+License: GPL (>= 2)
+Encoding: UTF-8
+Imports: Rcpp, RcppArmadillo
+LinkingTo: Rcpp, RcppArmadillo
+RoxygenNote: 7.2.1
+Suggests: knitr, rmarkdown
+VignetteBuilder: knitr
+URL: http://github.com/YuehaiW/StatComp22067
+BugReports: http://github.com/YuehaiW/StatComp22067/issues
+
+
